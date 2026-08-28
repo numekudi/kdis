@@ -17,6 +17,69 @@ const HISTORY_CAPACITY: usize = 10;
 const WINDOW_WIDTH: f32 = 260.0;
 const WINDOW_HEIGHT: f32 = 380.0;
 
+/// Requests the EWMH ABOVE state in addition to GPUI's notification window type.
+#[cfg(target_os = "linux")]
+fn request_always_on_top(_window: &Window) -> Result<(), String> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask};
+
+    let (connection, screen_index) =
+        x11rb::connect(None).map_err(|error| format!("could not connect to X11: {error}"))?;
+    let root = connection.setup().roots[screen_index].root;
+    let net_wm_pid = connection
+        .intern_atom(false, b"_NET_WM_PID")
+        .map_err(|error| format!("could not request _NET_WM_PID: {error}"))?
+        .reply()
+        .map_err(|error| format!("could not resolve _NET_WM_PID: {error}"))?
+        .atom;
+    let window_id = connection
+        .query_tree(root)
+        .map_err(|error| format!("could not query X11 windows: {error}"))?
+        .reply()
+        .map_err(|error| format!("could not read X11 windows: {error}"))?
+        .children
+        .into_iter()
+        .find_map(|window_id| {
+            let reply = connection
+                .get_property(false, window_id, net_wm_pid, AtomEnum::CARDINAL, 0, 1)
+                .ok()?
+                .reply()
+                .ok()?;
+            (reply.value32()?.next()? == std::process::id()).then_some(window_id)
+        })
+        .ok_or_else(|| "could not find the kdis X11 window by process id".to_string())?;
+    let wm_state = connection
+        .intern_atom(false, b"_NET_WM_STATE")
+        .map_err(|error| format!("could not request _NET_WM_STATE: {error}"))?
+        .reply()
+        .map_err(|error| format!("could not resolve _NET_WM_STATE: {error}"))?
+        .atom;
+    let wm_state_above = connection
+        .intern_atom(false, b"_NET_WM_STATE_ABOVE")
+        .map_err(|error| format!("could not request _NET_WM_STATE_ABOVE: {error}"))?
+        .reply()
+        .map_err(|error| format!("could not resolve _NET_WM_STATE_ABOVE: {error}"))?
+        .atom;
+    let event = ClientMessageEvent::new(32, window_id, wm_state, [1, wm_state_above, 0, 1, 0]);
+    connection
+        .send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )
+        .map_err(|error| format!("could not send always-on-top request: {error}"))?;
+    connection
+        .flush()
+        .map_err(|error| format!("could not flush always-on-top request: {error}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn request_always_on_top(_window: &Window) -> Result<(), String> {
+    Ok(())
+}
+
 struct KeyDisplay {
     history: KeyHistory,
     receiver: Receiver<InputMessage>,
@@ -163,7 +226,11 @@ fn main() {
                 window_decorations: None,
                 ..Default::default()
             },
-            move |_, cx| cx.new(|_| KeyDisplay::new(receiver)),
+            move |window, cx| {
+                request_always_on_top(window)
+                    .expect("failed to request always-on-top window state");
+                cx.new(|_| KeyDisplay::new(receiver))
+            },
         )
         .expect("failed to open key display window");
     });

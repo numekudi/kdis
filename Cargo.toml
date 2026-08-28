@@ -4,8 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui = "0.2.2"
 pynput = "1.8.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12.2"
+# GPUI 0.2.2 ignores WindowKind::PopUp on native Wayland. Its X11 backend
+# publishes the window as _NET_WM_WINDOW_TYPE_NOTIFICATION, which compositors
+# can keep above normal application windows through XWayland.
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "x11"] }
+x11rb = "0.13.2"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+gpui = "0.2.2"
