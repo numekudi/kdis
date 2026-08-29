@@ -18,6 +18,24 @@ GPUIで作った、格闘ゲーム向けのキーディスプレイです。グ�
 cargo run --release
 ```
 
+## Windows向けクロスビルド
+
+LinuxにRustのGNUターゲットとMinGW-w64を導入します（Ubuntuの例）。
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+cargo build --target x86_64-pc-windows-gnu
+```
+
+実行ファイルは`target/x86_64-pc-windows-gnu/debug/kdis.exe`に生成されます。Windowsではグローバル入力の取得に低レベルキーボードフックを使い、追加の入力権限は不要です。
+
+releaseビルドも同じターゲットを指定して生成できます。GPUI 0.2.2だけは、Linuxホストで実行されないオフラインFXC処理を避けるためランタイムシェーダー経路を使用します。
+
+```sh
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
 - 左ドラッグ: ウィンドウを移動
 - 右クリック: 終了
 

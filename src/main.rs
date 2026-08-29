@@ -1,13 +1,21 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod history;
+#[cfg(not(target_os = "windows"))]
 mod input;
+#[cfg(target_os = "windows")]
+#[path = "input_windows.rs"]
+mod input;
+mod window_layer;
+mod window_movement;
 
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Instant;
 
 use gpui::{
-    App, Application, Bounds, Context, MouseButton, MouseDownEvent, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla, point,
-    prelude::*, px, size,
+    App, Application, Bounds, Context, Div, Hsla, MouseButton, MouseDownEvent, MouseUpEvent,
+    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div,
+    hsla, point, prelude::*, px, size,
 };
 
 use history::KeyHistory;
@@ -17,67 +25,37 @@ const HISTORY_CAPACITY: usize = 10;
 const WINDOW_WIDTH: f32 = 260.0;
 const WINDOW_HEIGHT: f32 = 380.0;
 
-/// Requests the EWMH ABOVE state in addition to GPUI's notification window type.
-#[cfg(target_os = "linux")]
-fn request_always_on_top(_window: &Window) -> Result<(), String> {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask};
+/// Layers a restrained four-direction outline behind the foreground glyphs.
+fn outlined_text(text: impl Into<SharedString>, foreground: Hsla, outline: Hsla) -> Div {
+    let text = text.into();
+    const OUTLINE_OFFSETS: [(f32, f32); 4] = [(0.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+    let transparent = Hsla {
+        a: 0.0,
+        ..foreground
+    };
 
-    let (connection, screen_index) =
-        x11rb::connect(None).map_err(|error| format!("could not connect to X11: {error}"))?;
-    let root = connection.setup().roots[screen_index].root;
-    let net_wm_pid = connection
-        .intern_atom(false, b"_NET_WM_PID")
-        .map_err(|error| format!("could not request _NET_WM_PID: {error}"))?
-        .reply()
-        .map_err(|error| format!("could not resolve _NET_WM_PID: {error}"))?
-        .atom;
-    let window_id = connection
-        .query_tree(root)
-        .map_err(|error| format!("could not query X11 windows: {error}"))?
-        .reply()
-        .map_err(|error| format!("could not read X11 windows: {error}"))?
-        .children
-        .into_iter()
-        .find_map(|window_id| {
-            let reply = connection
-                .get_property(false, window_id, net_wm_pid, AtomEnum::CARDINAL, 0, 1)
-                .ok()?
-                .reply()
-                .ok()?;
-            (reply.value32()?.next()? == std::process::id()).then_some(window_id)
-        })
-        .ok_or_else(|| "could not find the kdis X11 window by process id".to_string())?;
-    let wm_state = connection
-        .intern_atom(false, b"_NET_WM_STATE")
-        .map_err(|error| format!("could not request _NET_WM_STATE: {error}"))?
-        .reply()
-        .map_err(|error| format!("could not resolve _NET_WM_STATE: {error}"))?
-        .atom;
-    let wm_state_above = connection
-        .intern_atom(false, b"_NET_WM_STATE_ABOVE")
-        .map_err(|error| format!("could not request _NET_WM_STATE_ABOVE: {error}"))?
-        .reply()
-        .map_err(|error| format!("could not resolve _NET_WM_STATE_ABOVE: {error}"))?
-        .atom;
-    let event = ClientMessageEvent::new(32, window_id, wm_state, [1, wm_state_above, 0, 1, 0]);
-    connection
-        .send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-            event,
+    div()
+        .relative()
+        // This invisible copy alone participates in layout, keeping every
+        // painted layer on the exact same origin and baseline.
+        .child(div().text_color(transparent).child(text.clone()))
+        .children(OUTLINE_OFFSETS.map(|(x, y)| {
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .text_color(outline)
+                .child(text.clone())
+        }))
+        // Positioned layers paint in insertion order; foreground must be last.
+        .child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .text_color(foreground)
+                .child(text),
         )
-        .map_err(|error| format!("could not send always-on-top request: {error}"))?;
-    connection
-        .flush()
-        .map_err(|error| format!("could not flush always-on-top request: {error}"))?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn request_always_on_top(_window: &Window) -> Result<(), String> {
-    Ok(())
 }
 
 struct KeyDisplay {
@@ -125,11 +103,14 @@ impl Render for KeyDisplay {
             .font_family("monospace")
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, window, _| {
                 // The entire chrome-less surface acts as a drag handle.
-                window.start_window_move();
+                window_movement::start(window);
             })
-            .on_mouse_down(MouseButton::Right, |_: &MouseDownEvent, _, cx| {
+            .on_mouse_up(MouseButton::Right, |_: &MouseUpEvent, _, cx| {
                 // A chrome-less overlay still needs an unobtrusive way to exit.
-                cx.quit();
+                // Wait for release so the popup captures both halves of the gesture;
+                // destroying it on button-down would leak mouse-up to the window below.
+                cx.stop_propagation();
+                cx.defer(|cx| cx.quit());
             })
             .when_some(self.listener_error.clone(), |view, error| {
                 view.child(
@@ -150,6 +131,8 @@ impl Render for KeyDisplay {
                 let duration_ms = row.display_millis_at(now);
                 let pressed = row.is_current();
                 let opacity = (1.0_f32 - index as f32 * 0.075).max(0.32);
+                let foreground = hsla(0.0, 0.0, 1.0, opacity);
+                let outline = hsla(0.0, 0.0, 0.0, opacity);
 
                 div()
                     .w_full()
@@ -174,7 +157,6 @@ impl Render for KeyDisplay {
                     } else {
                         hsla(0.63, 0.20, 0.08, 0.82)
                     })
-                    .text_color(hsla(0.0, 0.0, 1.0, opacity))
                     .child(
                         div()
                             .flex()
@@ -185,19 +167,18 @@ impl Render for KeyDisplay {
                                     .min_w(px(18.0))
                                     .text_center()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child(key.label.clone())
+                                    .child(outlined_text(key.label.clone(), foreground, outline))
                             })),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(if pressed {
-                                hsla(0.48, 0.82, 0.70, opacity)
-                            } else {
-                                hsla(0.0, 0.0, 0.78, opacity)
-                            })
-                            .child(format!("{duration_ms} ms")),
-                    )
+                    .child(div().text_sm().child(outlined_text(
+                        format!("{duration_ms} ms"),
+                        if pressed {
+                            hsla(0.48, 0.82, 0.70, opacity)
+                        } else {
+                            hsla(0.0, 0.0, 0.78, opacity)
+                        },
+                        outline,
+                    )))
             }))
     }
 }
@@ -227,8 +208,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                request_always_on_top(window)
-                    .expect("failed to request always-on-top window state");
+                window_layer::enable_always_on_top(window);
                 cx.new(|_| KeyDisplay::new(receiver))
             },
         )

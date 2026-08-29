@@ -2859,9 +2859,12 @@ dependencies = [
 name = "kdis"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "evdev",
  "gpui",
  "pynput",
+ "raw-window-handle",
+ "windows 0.61.3",
  "x11rb",
 ]
 

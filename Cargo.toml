@@ -3,11 +3,12 @@ name = "kdis"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-pynput = "1.8.2"
+[build-dependencies]
+embed-resource = "3.0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12.2"
+pynput = "1.8.2"
 # GPUI 0.2.2 ignores WindowKind::PopUp on native Wayland. Its X11 backend
 # publishes the window as _NET_WM_WINDOW_TYPE_NOTIFICATION, which compositors
 # can keep above normal application windows through XWayland.
@@ -16,3 +17,23 @@ x11rb = "0.13.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 gpui = "0.2.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+pynput = "1.8.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6.2"
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release.package.gpui]
+# GPUI 0.2.2 only runs its offline FXC step on a Windows build host. Keeping
+# assertions for this dependency selects its runtime HLSL path during cross-builds.
+debug-assertions = true
+
+[profile.release.package."gpui-macros"]
+# GPUI's reflection macro uses the same assertion gate as the consuming crate.
+debug-assertions = true
