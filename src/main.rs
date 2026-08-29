@@ -8,6 +8,8 @@ mod input;
 mod input;
 mod window_layer;
 mod window_movement;
+#[cfg(target_os = "linux")]
+mod x11_window;
 
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Instant;
@@ -24,6 +26,18 @@ use input::InputMessage;
 const HISTORY_CAPACITY: usize = 10;
 const WINDOW_WIDTH: f32 = 260.0;
 const WINDOW_HEIGHT: f32 = 380.0;
+
+/// Mutter deliberately disallows moving EWMH notification windows. A normal
+/// X11 window receives overlay-specific states after creation instead.
+#[cfg(target_os = "linux")]
+fn overlay_window_kind() -> WindowKind {
+    WindowKind::Normal
+}
+
+#[cfg(not(target_os = "linux"))]
+fn overlay_window_kind() -> WindowKind {
+    WindowKind::PopUp
+}
 
 /// Layers a restrained four-direction outline behind the foreground glyphs.
 fn outlined_text(text: impl Into<SharedString>, foreground: Hsla, outline: Hsla) -> Div {
@@ -197,7 +211,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
                 focus: false,
-                kind: WindowKind::PopUp,
+                kind: overlay_window_kind(),
                 is_movable: true,
                 is_resizable: false,
                 is_minimizable: false,
@@ -208,7 +222,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                window_layer::enable_always_on_top(window);
+                window_layer::configure(window);
                 cx.new(|_| KeyDisplay::new(receiver))
             },
         )

@@ -1,8 +1,17 @@
 use gpui::Window;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 pub fn start(window: &Window) {
     window.start_window_move();
+}
+
+#[cfg(target_os = "linux")]
+pub fn start(_window: &Window) {
+    // GPUI 0.2.2 sends button 0 in its X11 EWMH request. Strict window
+    // managers require the actual pressed button, so issue the request here.
+    crate::x11_window::X11Window::for_current_process()
+        .and_then(|window| window.start_move())
+        .expect("failed to start the X11 window move");
 }
 
 #[cfg(target_os = "windows")]
