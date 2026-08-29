@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyNameTextW, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE,
+    GetKeyNameTextW, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
@@ -86,10 +86,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 fn signal_for(event: &KBDLLHOOKSTRUCT, pressed: bool) -> KeySignal {
-    // Scan code and flags distinguish physical left/right and extended keys sharing a VK code.
-    // Only the extended-key bit is stable across the matching key-down/key-up pair.
+    // The virtual key and extended bit stay stable across a press/release pair. Some keyboards
+    // report different scan-code forms for lock-key transitions, so scan codes are display-only.
     let extended = event.flags.0 & 1;
-    let key = KeyId::new(format!("vk:{}:{}:{extended}", event.vkCode, event.scanCode));
+    let key = windows_key_id(event.vkCode, extended != 0);
     let at = Instant::now();
     if pressed {
         KeySignal::Pressed {
@@ -101,6 +101,11 @@ fn signal_for(event: &KBDLLHOOKSTRUCT, pressed: bool) -> KeySignal {
     } else {
         KeySignal::Released { key, at }
     }
+}
+
+/// Identifies a Windows key without layout- or device-specific scan-code details.
+fn windows_key_id(vk: u32, extended: bool) -> KeyId {
+    KeyId::new(format!("vk:{vk}:{}", u8::from(extended)))
 }
 
 fn key_label(vk: u32, scan_code: u32, extended: bool) -> String {
@@ -118,6 +123,7 @@ fn fixed_key_label(vk: u32) -> Option<String> {
         0x0D => Some("ENTER".into()),
         0x1B => Some("ESC".into()),
         value if value == VK_SPACE.0 as u32 => Some("SPACE".into()),
+        value if value == VK_CAPITAL.0 as u32 => Some("CAPS LOCK".into()),
         value if value == VK_SHIFT.0 as u32 => Some("SHIFT".into()),
         value if value == VK_LSHIFT.0 as u32 => Some("L-SHIFT".into()),
         value if value == VK_RSHIFT.0 as u32 => Some("R-SHIFT".into()),
@@ -220,6 +226,13 @@ mod tests {
     fn builds_key_name_message_bits() {
         assert_eq!(key_name_lparam(0x1E, false), 0x001E_0000);
         assert_eq!(key_name_lparam(0x5B, true), 0x015B_0000);
+    }
+
+    #[test]
+    fn key_identity_contains_only_stable_event_components() {
+        assert_eq!(windows_key_id(0x14, false), KeyId::new("vk:20:0"));
+        assert_eq!(windows_key_id(0x14, true), KeyId::new("vk:20:1"));
+        assert_ne!(windows_key_id(0x0D, false), windows_key_id(0x0D, true));
     }
 
     #[test]
