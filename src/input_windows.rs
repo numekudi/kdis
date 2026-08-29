@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
-    VK_SHIFT, VK_SPACE,
+    GetKeyNameTextW, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
+    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
@@ -94,7 +94,7 @@ fn signal_for(event: &KBDLLHOOKSTRUCT, pressed: bool) -> KeySignal {
     if pressed {
         KeySignal::Pressed {
             key,
-            label: key_label(event.vkCode),
+            label: key_label(event.vkCode, event.scanCode, extended != 0),
             sort_code: display_sort_code(event.vkCode, event.scanCode),
             at,
         }
@@ -103,32 +103,66 @@ fn signal_for(event: &KBDLLHOOKSTRUCT, pressed: bool) -> KeySignal {
     }
 }
 
-fn key_label(vk: u32) -> String {
-    match vk {
-        0x08 => "BACKSPACE".into(),
-        0x09 => "TAB".into(),
-        0x0D => "ENTER".into(),
-        0x1B => "ESC".into(),
-        value if value == VK_SPACE.0 as u32 => "SPACE".into(),
-        value if value == VK_SHIFT.0 as u32 => "SHIFT".into(),
-        value if value == VK_LSHIFT.0 as u32 => "L-SHIFT".into(),
-        value if value == VK_RSHIFT.0 as u32 => "R-SHIFT".into(),
-        value if value == VK_CONTROL.0 as u32 => "CTRL".into(),
-        value if value == VK_LCONTROL.0 as u32 => "L-CTRL".into(),
-        value if value == VK_RCONTROL.0 as u32 => "R-CTRL".into(),
-        value if value == VK_MENU.0 as u32 => "ALT".into(),
-        value if value == VK_LMENU.0 as u32 => "L-ALT".into(),
-        value if value == VK_RMENU.0 as u32 => "R-ALT".into(),
-        0x25 => "←".into(),
-        0x26 => "↑".into(),
-        0x27 => "→".into(),
-        0x28 => "↓".into(),
-        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk)
-            .expect("ASCII virtual-key codes are valid Unicode")
-            .to_string(),
-        0x70..=0x87 => format!("F{}", vk - 0x6F),
-        _ => format!("VK {vk}"),
+fn key_label(vk: u32, scan_code: u32, extended: bool) -> String {
+    match fixed_key_label(vk) {
+        Some(label) => label,
+        None => layout_key_label(scan_code, extended).unwrap_or_else(|| format!("VK {vk}")),
     }
+}
+
+/// Keeps compact application labels for keys whose Windows names are verbose or ambiguous.
+fn fixed_key_label(vk: u32) -> Option<String> {
+    match vk {
+        0x08 => Some("BACKSPACE".into()),
+        0x09 => Some("TAB".into()),
+        0x0D => Some("ENTER".into()),
+        0x1B => Some("ESC".into()),
+        value if value == VK_SPACE.0 as u32 => Some("SPACE".into()),
+        value if value == VK_SHIFT.0 as u32 => Some("SHIFT".into()),
+        value if value == VK_LSHIFT.0 as u32 => Some("L-SHIFT".into()),
+        value if value == VK_RSHIFT.0 as u32 => Some("R-SHIFT".into()),
+        value if value == VK_CONTROL.0 as u32 => Some("CTRL".into()),
+        value if value == VK_LCONTROL.0 as u32 => Some("L-CTRL".into()),
+        value if value == VK_RCONTROL.0 as u32 => Some("R-CTRL".into()),
+        value if value == VK_MENU.0 as u32 => Some("ALT".into()),
+        value if value == VK_LMENU.0 as u32 => Some("L-ALT".into()),
+        value if value == VK_RMENU.0 as u32 => Some("R-ALT".into()),
+        value if value == VK_LWIN.0 as u32 => Some("L-WIN".into()),
+        value if value == VK_RWIN.0 as u32 => Some("R-WIN".into()),
+        0x25 => Some("←".into()),
+        0x26 => Some("↑".into()),
+        0x27 => Some("→".into()),
+        0x28 => Some("↓".into()),
+        0x30..=0x39 | 0x41..=0x5A => Some(
+            char::from_u32(vk)
+                .expect("ASCII virtual-key codes are valid Unicode")
+                .to_string(),
+        ),
+        0x70..=0x87 => Some(format!("F{}", vk - 0x6F)),
+        _ => None,
+    }
+}
+
+/// Resolves OEM punctuation and other layout-sensitive keys through the active Windows layout.
+fn layout_key_label(scan_code: u32, extended: bool) -> Option<String> {
+    let mut buffer = [0_u16; 64];
+    let length = unsafe { GetKeyNameTextW(key_name_lparam(scan_code, extended), &mut buffer) };
+    if length <= 0 {
+        return None;
+    }
+
+    let length = usize::try_from(length).expect("a positive key-name length fits in usize");
+    Some(
+        String::from_utf16(&buffer[..length])
+            .expect("Windows key names are valid UTF-16")
+            .to_uppercase(),
+    )
+}
+
+/// Builds the keyboard-message bits consumed by GetKeyNameTextW.
+fn key_name_lparam(scan_code: u32, extended: bool) -> i32 {
+    let extended_bit = if extended { 1_u32 << 24 } else { 0 };
+    ((scan_code & 0xff) << 16 | extended_bit) as i32
 }
 
 /// Places modifiers on the left, with left-hand variants before right-hand ones.
@@ -167,16 +201,25 @@ mod tests {
 
     #[test]
     fn formats_common_windows_virtual_keys() {
-        assert_eq!(key_label(0x20), "SPACE");
-        assert_eq!(key_label(0xA0), "L-SHIFT");
-        assert_eq!(key_label(0xA1), "R-SHIFT");
-        assert_eq!(key_label(0xA2), "L-CTRL");
-        assert_eq!(key_label(0xA3), "R-CTRL");
-        assert_eq!(key_label(0x0D), "ENTER");
-        assert_eq!(key_label(0x41), "A");
-        assert_eq!(key_label(0x31), "1");
-        assert_eq!(key_label(0x25), "←");
-        assert_eq!(key_label(0x7B), "F12");
+        assert_eq!(fixed_key_label(0x20).as_deref(), Some("SPACE"));
+        assert_eq!(fixed_key_label(0xA0).as_deref(), Some("L-SHIFT"));
+        assert_eq!(fixed_key_label(0xA1).as_deref(), Some("R-SHIFT"));
+        assert_eq!(fixed_key_label(0xA2).as_deref(), Some("L-CTRL"));
+        assert_eq!(fixed_key_label(0xA3).as_deref(), Some("R-CTRL"));
+        assert_eq!(fixed_key_label(0x5B).as_deref(), Some("L-WIN"));
+        assert_eq!(fixed_key_label(0x5C).as_deref(), Some("R-WIN"));
+        assert_eq!(fixed_key_label(0x0D).as_deref(), Some("ENTER"));
+        assert_eq!(fixed_key_label(0x41).as_deref(), Some("A"));
+        assert_eq!(fixed_key_label(0x31).as_deref(), Some("1"));
+        assert_eq!(fixed_key_label(0x25).as_deref(), Some("←"));
+        assert_eq!(fixed_key_label(0x7B).as_deref(), Some("F12"));
+        assert_eq!(fixed_key_label(0xBA), None);
+    }
+
+    #[test]
+    fn builds_key_name_message_bits() {
+        assert_eq!(key_name_lparam(0x1E, false), 0x001E_0000);
+        assert_eq!(key_name_lparam(0x5B, true), 0x015B_0000);
     }
 
     #[test]
